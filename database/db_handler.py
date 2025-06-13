@@ -487,6 +487,159 @@ class DatabaseHandler:
             "total_processed": total
         }
     
+    def submit_final_questions(self, questions: List[Dict]) -> Dict:
+        """Submit final ranked questions to the final endpoint with enhanced debugging"""
+        try:
+            logger.info("🏆 Starting final submission process...")
+            
+            # Filter and format questions for final submission
+            final_questions = self._prepare_questions_for_final_submission(questions)
+            
+            if not final_questions:
+                logger.warning("📭 No questions ready for final submission")
+                return {
+                    "submitted_count": 0,
+                    "total_processed": len(questions),
+                    "success": False,
+                    "message": "No questions with ranked correct answers found"
+                }
+            
+            logger.info(f"📤 Submitting {len(final_questions)} questions to final endpoint")
+            
+            # Prepare payload
+            final_payload = {"questions": final_questions}
+            
+            # 🔍 DEBUG: Log the exact payload being sent
+            logger.info("🔍 DEBUG: Final payload being sent:")
+            logger.info("=" * 50)
+            logger.info(json.dumps(final_payload, indent=2, default=str))
+            logger.info("=" * 50)
+            
+            # Create final API handler for the final endpoint
+            final_api = APIHandler(
+                base_url=Config.API_BASE_URL,
+                api_key=Config.API_KEY,
+                endpoint="/api/v1/admin/survey/final"
+            )
+            
+            # Make the final submission
+            response = final_api.make_request("POST", final_payload)
+            
+            # 🔍 DEBUG: Log the response
+            logger.info(f"🔍 DEBUG: Server response: {json.dumps(response, indent=2, default=str)}")
+            
+            # Check response
+            if ResponseProcessor.is_success_response(response):
+                logger.info(f"✅ Final submission successful: {len(final_questions)} questions submitted")
+                
+                self.last_operation_details = {
+                    "operation": "final_submission",
+                    "success": True,
+                    "submitted_count": len(final_questions),
+                    "total_processed": len(questions),
+                    "response_preview": str(response)[:200]
+                }
+                
+                return {
+                    "submitted_count": len(final_questions),
+                    "total_processed": len(questions),
+                    "success": True,
+                    "message": "Final submission completed successfully"
+                }
+            else:
+                error_msg = response.get("message", str(response))
+                logger.error(f"❌ Final submission failed: {error_msg}")
+                
+                self.last_operation_details = {
+                    "operation": "final_submission",
+                    "success": False,
+                    "error": error_msg,
+                    "response": response
+                }
+                
+                return {
+                    "submitted_count": 0,
+                    "total_processed": len(questions),
+                    "success": False,
+                    "error": error_msg
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Final submission failed with exception: {str(e)}")
+            
+            self.last_operation_details = {
+                "operation": "final_submission",
+                "success": False,
+                "error": str(e),
+                "error_type": type(e).__name__
+            }
+            
+            return {
+                "submitted_count": 0,
+                "total_processed": len(questions),
+                "success": False,
+                "error": str(e)
+            }
+    
+    def _prepare_questions_for_final_submission(self, questions: List[Dict]) -> List[Dict]:
+        """Prepare questions for final submission - ONLY Input type questions with minimum 5 correct answers"""
+        final_questions = []
+        
+        for question in questions:
+            question_id = QuestionFormatter.get_question_id(question)
+            question_type = question.get('questionType', '')
+            
+            # ONLY process Input type questions for final submission
+            if question_type.lower() != 'input':
+                logger.info(f"⏭️ Skipping question {question_id} - Only Input type questions are submitted to final (Type: {question_type})")
+                continue
+            
+            # Check if question has answers
+            if not question.get('answers'):
+                logger.debug(f"Skipping question {question_id} - no answers")
+                continue
+            
+            # Filter answers: only isCorrect=true with rank > 0 and score > 0
+            final_answers = []
+            for answer in question['answers']:
+                if (answer.get('isCorrect') is True and 
+                    answer.get('rank', 0) > 0 and 
+                    answer.get('score', 0) > 0):
+                    
+                    # Format answer for final submission - ensure clean data types
+                    final_answer = {
+                        "answer": str(answer.get('answer', '')),  # Ensure string
+                        "responseCount": int(answer.get('responseCount', 0)),  # Ensure integer
+                        "isCorrect": True,  # Always true for final submission
+                        "rank": int(answer.get('rank', 0)),  # Ensure integer
+                        "score": int(answer.get('score', 0))  # Ensure integer
+                    }
+                    final_answers.append(final_answer)
+            
+            # Apply business rule: Input type questions need minimum 5 correct answers
+            if len(final_answers) < 5:
+                logger.warning(f"⚠️ Skipping Input question {question_id} - needs minimum 5 correct answers, found {len(final_answers)}")
+                continue
+            
+            # Include Input question with valid final answers
+            if final_answers:
+                final_question = {
+                    "question": str(question.get('question', '')),  # Ensure string
+                    "questionType": str(question.get('questionType', '')),  # Ensure string
+                    "questionCategory": str(question.get('questionCategory', '')),  # Ensure string
+                    "questionLevel": str(question.get('questionLevel', '')),  # Ensure string
+                    "timesSkipped": int(question.get('timesSkipped', 0)),  # Ensure integer
+                    "timesAnswered": int(question.get('timesAnswered', 0)),  # Ensure integer
+                    "answers": final_answers
+                }
+                final_questions.append(final_question)
+                logger.info(f"✅ Input question {question_id} prepared with {len(final_answers)} final answers")
+            else:
+                logger.debug(f"⏭️ Skipping Input question {question_id} - no ranked correct answers")
+        
+        logger.info(f"📋 Prepared {len(final_questions)} Input questions for final submission")
+        return final_questions
+    
     def get_diagnostic_summary(self) -> Dict:
         """Get comprehensive diagnostic information"""
         summary = {

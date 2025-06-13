@@ -1,5 +1,5 @@
 """
-Refactored Ranking Service - Clean and modular
+Enhanced Ranking Service - Complete with Final Submission Integration
 """
 
 import logging
@@ -153,24 +153,163 @@ class RankingService:
         """Validate question data before sending to API"""
         return DataValidator.validate_question(question)
     
-    def process_all_questions(self) -> Dict:
-        """Process ranking for all questions that have correct answers"""
+    # Replace these methods in your services/ranking_service.py file:
+
+    def _validate_question_for_final_submission(self, question: Dict) -> bool:
+        """Validate if question meets final submission requirements - ONLY Input type questions"""
+        question_id = QuestionFormatter.get_question_id(question)
+        question_type = question.get('questionType', '')
+        
+        # ONLY Input type questions are submitted to final
+        if question_type.lower() != 'input':
+            logger.debug(f"Question {question_id} is {question_type} type - only Input questions go to final")
+            return False
+        
+        if not question.get('answers'):
+            logger.debug(f"Question {question_id} has no answers")
+            return False
+        
+        # Count correct answers with rank > 0 and score > 0
+        valid_correct_answers = 0
+        for answer in question['answers']:
+            if (answer.get('isCorrect') is True and 
+                answer.get('rank', 0) > 0 and 
+                answer.get('score', 0) > 0):
+                valid_correct_answers += 1
+        
+        # Input type questions need minimum 5 correct answers
+        if valid_correct_answers < 5:
+            logger.info(f"📋 Input question {question_id} needs more correct answers for final submission: "
+                    f"has {valid_correct_answers}, needs 5 minimum")
+            return False
+        else:
+            logger.info(f"✅ Input question {question_id} ready for final submission: "
+                    f"{valid_correct_answers} correct answers")
+            return True
+
+    def get_final_submission_summary(self, questions: List[Dict]) -> Dict:
+        """Get summary of questions ready for final submission - Input type only"""
+        summary = {
+            "total_questions": len(questions),
+            "total_input_questions": 0,
+            "ready_for_final": 0,
+            "needs_more_answers": 0,
+            "non_input_questions": 0,
+            "by_type": {}
+        }
+        
+        for question in questions:
+            question_type = question.get('questionType', 'Unknown')
+            
+            if question_type not in summary["by_type"]:
+                summary["by_type"][question_type] = {
+                    "total": 0,
+                    "ready": 0,
+                    "needs_more": 0,
+                    "note": ""
+                }
+            
+            summary["by_type"][question_type]["total"] += 1
+            
+            if question_type.lower() == 'input':
+                summary["total_input_questions"] += 1
+                if self._validate_question_for_final_submission(question):
+                    summary["ready_for_final"] += 1
+                    summary["by_type"][question_type]["ready"] += 1
+                else:
+                    # Check if it's because of minimum answer requirement
+                    correct_count = sum(1 for a in question.get('answers', []) 
+                                    if a.get('isCorrect') and a.get('rank', 0) > 0)
+                    
+                    if 0 < correct_count < 5:
+                        summary["needs_more_answers"] += 1
+                        summary["by_type"][question_type]["needs_more"] += 1
+            else:
+                summary["non_input_questions"] += 1
+                summary["by_type"][question_type]["note"] = "Not submitted to final (Input only)"
+        
+        return summary
+
+    def process_all_questions_with_final_submission(self) -> Dict:
+        """Process ranking for all questions and submit final results with enhanced reporting"""
         try:
             logger.info(LogMessages.PROCESSING_START)
             
-            questions = self._fetch_questions()
-            if not questions:
-                return self._create_empty_result()
+            # Step 1: Process ranking (existing functionality)
+            ranking_result = self.process_all_questions()
             
-            logger.info(f"Found {len(questions)} questions to process")
-            
-            processing_result = self._process_questions_batch(questions)
-            update_result = self._update_processed_questions(processing_result['processed_questions'])
-            
-            return self._combine_results(processing_result, update_result, len(questions))
-            
+            # Step 2: Get final submission summary before submitting
+            if ranking_result["updated_count"] > 0:
+                logger.info("🏆 Ranking completed successfully, analyzing final submission readiness...")
+                
+                # Fetch the updated questions with rankings
+                updated_questions = self._fetch_questions()
+                
+                # Get final submission summary
+                final_summary = self.get_final_submission_summary(updated_questions)
+                
+                logger.info("📊 Final Submission Analysis:")
+                logger.info(f"   Total Questions: {final_summary['total_questions']}")
+                logger.info(f"   Ready for Final: {final_summary['ready_for_final']}")
+                logger.info(f"   Need More Answers: {final_summary['needs_more_answers']}")
+                logger.info(f"   Input Questions: {final_summary['total_input_questions']}")
+                logger.info(f"   Non-Input Questions: {final_summary['non_input_questions']}")
+                
+                # Log by question type
+                for q_type, stats in final_summary['by_type'].items():
+                    if q_type.lower() == 'input':
+                        logger.info(f"   {q_type}: {stats['ready']}/{stats['total']} ready")
+                        if stats['needs_more'] > 0:
+                            logger.warning(f"     ⚠️ {stats['needs_more']} {q_type} questions need more correct answers (min 5)")
+                    else:
+                        logger.info(f"   {q_type}: {stats['total']} total (not submitted to final)")
+                
+                # Submit to final endpoint
+                if final_summary['ready_for_final'] > 0:
+                    logger.info(f"📤 Proceeding with final submission of {final_summary['ready_for_final']} Input questions...")
+                    final_result = self.db.submit_final_questions(updated_questions)
+                else:
+                    logger.warning("⚠️ No Input questions ready for final submission - skipping final submission")
+                    final_result = {
+                        "submitted_count": 0,
+                        "total_processed": len(updated_questions),
+                        "success": False,
+                        "message": "No Input questions met minimum requirements for final submission"
+                    }
+                
+                # Combine results
+                combined_result = ranking_result.copy()
+                combined_result.update({
+                    "final_submitted_count": final_result["submitted_count"],
+                    "final_submission_success": final_result.get("success", False),
+                    "final_submission_message": final_result.get("message", ""),
+                    "final_ready_count": final_summary['ready_for_final'],
+                    "final_needs_more_count": final_summary['needs_more_answers']
+                })
+                
+                if final_result.get("success"):
+                    logger.info(f"🎉 Complete process finished! Ranked {ranking_result['updated_count']} questions, "
+                            f"submitted {final_result['submitted_count']} Input questions to final collection")
+                elif final_summary['ready_for_final'] == 0:
+                    logger.info(f"ℹ️ Ranking completed but no Input questions ready for final submission "
+                            f"({final_summary['needs_more_answers']} need more correct answers)")
+                else:
+                    logger.warning(f"⚠️ Ranking completed but final submission failed: {final_result.get('message', 'Unknown error')}")
+                
+                return combined_result
+            else:
+                logger.info("ℹ️ No questions were updated with rankings, skipping final submission")
+                ranking_result.update({
+                    "final_submitted_count": 0,
+                    "final_submission_success": False,
+                    "final_submission_message": "No ranked questions to submit",
+                    "final_ready_count": 0,
+                    "final_needs_more_count": 0
+                })
+                return ranking_result
+                
         except Exception as e:
-            logger.error(LogMessages.PROCESSING_FAILED.format(error=str(e)))
+            logger.error(f"❌ Complete process failed: {str(e)}")
             logger.error(f"Exception details: {type(e).__name__}: {str(e)}")
             raise
     

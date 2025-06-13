@@ -1,5 +1,5 @@
 """
-Refactored Flask Application - Clean and modular
+Refactored Flask Application - Clean and modular with Final Submission
 """
 
 import time
@@ -123,6 +123,66 @@ class APIEndpoints:
             }
         except Exception as e:
             logger.error(f"Ranking process failed: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return {"status": "error", "error": str(e)}
+    
+    def submit_final_questions(self) -> dict:
+        """Submit final questions logic"""
+        try:
+            start_time = time.time()
+            
+            # Fetch questions
+            questions = self.db_handler.fetch_all_questions()
+            
+            if not questions:
+                return {
+                    "status": "error",
+                    "error": "No questions found to submit"
+                }
+            
+            # Submit to final endpoint
+            result = self.db_handler.submit_final_questions(questions)
+            processing_time = round(time.time() - start_time, 2)
+            
+            return {
+                "status": "success" if result.get("success") else "error",
+                "results": {
+                    "submitted_count": result["submitted_count"],
+                    "total_processed": result["total_processed"],
+                    "processing_time": f"{processing_time}s",
+                    "message": result.get("message", "")
+                },
+                "error": result.get("error") if not result.get("success") else None
+            }
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+    
+    def process_complete_ranking_and_submission(self) -> dict:
+        """Process complete ranking with final submission logic"""
+        try:
+            start_time = time.time()
+            result = self.ranking_service.process_all_questions_with_final_submission()
+            processing_time = round(time.time() - start_time, 2)
+            
+            return {
+                "status": "success",
+                "results": {
+                    "total_questions": result["total_questions"],
+                    "processed_count": result["processed_count"],
+                    "skipped_count": result["skipped_count"],
+                    "updated_count": result["updated_count"],
+                    "failed_count": result["failed_count"],
+                    "answers_ranked": result["answers_ranked"],
+                    "answers_scored": result["answers_scored"],
+                    "final_submitted_count": result.get("final_submitted_count", 0),
+                    "final_submission_success": result.get("final_submission_success", False),
+                    "final_ready_count": result.get("final_ready_count", 0),
+                    "final_needs_more_count": result.get("final_needs_more_count", 0),
+                    "processing_time": f"{processing_time}s"
+                }
+            }
+        except Exception as e:
+            logger.error(f"Complete ranking and submission failed: {str(e)}")
             logger.error(f"Traceback: {traceback.format_exc()}")
             return {"status": "error", "error": str(e)}
 
@@ -424,8 +484,8 @@ class TemplateProvider:
         <div class="logo">
             <div class="logo-icon">🏆</div>
             <div class="logo-text">
-                <h1>Survey Ranking</h1>
-                <p>Monitor ranking process</p>
+                <h1>Survey Ranking & Final Submission</h1>
+                <p>Monitor complete ranking process with final submission</p>
             </div>
         </div>
     </div>
@@ -440,8 +500,13 @@ class TemplateProvider:
             
             <div class="section">
                 <div class="button-group">
-                    <button class="btn btn-warning" onclick="runFullProcess()">🏆 Rank</button>
+                    <button class="btn btn-warning" onclick="runCompleteProcess()">🏆 Rank & Submit</button>
+                    <button class="btn btn-success" onclick="submitFinalOnly()">🚀 Submit Final</button>
                 </div>
+                <p style="margin-top: 12px; font-size: 13px; color: #718096;">
+                    <strong>Rank & Submit:</strong> Complete process (rank answers + submit to final)<br>
+                    <strong>Submit Final:</strong> Submit already ranked questions to final collection
+                </p>
             </div>
         </div>
 
@@ -490,6 +555,10 @@ class TemplateProvider:
                     <div class="stat-card">
                         <div class="stat-number" id="final-submitted">-</div>
                         <div class="stat-label">Final Submitted</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number" id="final-ready">-</div>
+                        <div class="stat-label">Ready for Final</div>
                     </div>
                 </div>
             </div>
@@ -544,6 +613,9 @@ class TemplateProvider:
             if (stats.final_submitted_count !== undefined) {
                 document.getElementById('final-submitted').textContent = stats.final_submitted_count;
             }
+            if (stats.final_ready_count !== undefined) {
+                document.getElementById('final-ready').textContent = stats.final_ready_count;
+            }
         }
 
         async function makeRequest(endpoint, method = 'GET') {
@@ -591,9 +663,27 @@ class TemplateProvider:
             await makeRequest('/api/process-ranking', 'POST');
         }
 
-        async function runFullProcess() {
-            addLog('Starting ranking process...');
-            updateStatus('🏆 Processing rankings...', 'info');
+        async function submitFinalOnly() {
+            addLog('Submitting final questions...');
+            updateStatus('🚀 Submitting to final collection...', 'info');
+            
+            try {
+                await testConnection();
+                await new Promise(resolve => setTimeout(resolve, 500));
+                
+                await makeRequest('/api/submit-final', 'POST');
+                
+                updateStatus('🎉 Final submission completed!', 'success');
+                addLog('Final submission completed successfully!');
+            } catch (error) {
+                updateStatus('❌ Final submission failed', 'error');
+                addLog('Final submission failed', 'ERROR');
+            }
+        }
+
+        async function runCompleteProcess() {
+            addLog('Starting complete ranking and final submission process...');
+            updateStatus('🏆 Processing rankings and submitting...', 'info');
             
             try {
                 await testConnection();
@@ -602,14 +692,19 @@ class TemplateProvider:
                 await fetchQuestions();
                 await new Promise(resolve => setTimeout(resolve, 500));
                 
-                await processRanking();
+                await makeRequest('/api/complete-process', 'POST');
                 
-                updateStatus('🎉 Ranking completed!', 'success');
-                addLog('Ranking process completed successfully!');
+                updateStatus('🎉 Complete process finished!', 'success');
+                addLog('Complete ranking and final submission process completed successfully!');
             } catch (error) {
-                updateStatus('❌ Ranking failed', 'error');
-                addLog('Ranking process failed', 'ERROR');
+                updateStatus('❌ Complete process failed', 'error');
+                addLog('Complete process failed', 'ERROR');
             }
+        }
+
+        // Keep the old runFullProcess for backward compatibility
+        async function runFullProcess() {
+            await runCompleteProcess();
         }
 
         function clearLogs() {
@@ -668,6 +763,20 @@ def get_questions():
 def process_ranking():
     """Process ranking for all questions"""
     result = api_endpoints.process_ranking()
+    status_code = 500 if result["status"] == "error" else 200
+    return jsonify(result), status_code
+
+@app.route('/api/submit-final', methods=['POST'])
+def submit_final():
+    """Submit questions to final endpoint"""
+    result = api_endpoints.submit_final_questions()
+    status_code = 500 if result["status"] == "error" else 200
+    return jsonify(result), status_code
+
+@app.route('/api/complete-process', methods=['POST'])
+def complete_process():
+    """Process ranking and submit to final endpoint"""
+    result = api_endpoints.process_complete_ranking_and_submission()
     status_code = 500 if result["status"] == "error" else 200
     return jsonify(result), status_code
 

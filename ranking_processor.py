@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Refactored One-time ranking processor
+Refactored One-time ranking processor with Final Submission
 Clean, modular, and easy to understand
 """
 
@@ -19,15 +19,15 @@ class ProcessorDisplay:
     @staticmethod
     def print_header():
         """Print application header"""
-        print("🚀 Starting Survey Answer Ranking Processor")
-        print("=" * 60)
+        print("🚀 Starting Survey Answer Ranking & Final Submission Processor")
+        print("=" * 70)
     
     @staticmethod
     def print_results(result: Dict, processing_time: float):
-        """Print processing results in a formatted way"""
-        print("\n" + "=" * 60)
-        print("📊 RANKING PROCESS COMPLETED")
-        print("=" * 60)
+        """Print processing results including final submission in a formatted way"""
+        print("\n" + "=" * 70)
+        print("📊 COMPLETE RANKING & FINAL SUBMISSION RESULTS")
+        print("=" * 70)
         print(f"⏱️  Processing Time: {processing_time}s")
         print(f"📝 Total Questions: {result['total_questions']}")
         print(f"✅ Processed: {result['processed_count']}")
@@ -37,19 +37,42 @@ class ProcessorDisplay:
         print(f"🏆 Answers Ranked: {result['answers_ranked']}")
         print(f"🎯 Answers Scored: {result['answers_scored']}")
         
+        # Final submission results
+        if 'final_submitted_count' in result:
+            print(f"🚀 Final Submitted: {result['final_submitted_count']}")
+            if result.get('final_submission_success'):
+                print(f"✅ Final Submission: Success")
+            else:
+                print(f"❌ Final Submission: Failed - {result.get('final_submission_message', 'Unknown error')}")
+            
+            # Show final submission readiness summary
+            if 'final_ready_count' in result:
+                print(f"📋 Ready for Final: {result['final_ready_count']}")
+            if 'final_needs_more_count' in result and result['final_needs_more_count'] > 0:
+                print(f"⚠️  Need More Answers: {result['final_needs_more_count']} (Input type needs min 5)")
+        
         ProcessorDisplay._print_warnings_and_success(result)
         
-        print("=" * 60)
-        print("🏁 Process finished. Application will now exit.")
+        print("=" * 70)
+        print("🏁 Complete process finished. Application will now exit.")
     
     @staticmethod
     def _print_warnings_and_success(result: Dict):
-        """Print warnings and success messages based on results"""
+        """Print warnings and success messages based on results including final submission"""
         if result['failed_count'] > 0:
             print(f"\n⚠️  Warning: {result['failed_count']} questions failed to update")
         
         if result['updated_count'] > 0:
             print(f"\n🎉 Success! {result['updated_count']} questions updated with rankings")
+            
+            # Final submission success message
+            if result.get('final_submitted_count', 0) > 0:
+                print(f"🚀 Success! {result['final_submitted_count']} questions submitted to final collection")
+            elif 'final_submission_success' in result and not result['final_submission_success']:
+                if result.get('final_ready_count', 0) == 0:
+                    print(f"\n ℹ️ No questions ready for final submission (need more correct answers)")
+                else:
+                    print(f"\n⚠️  Warning: Final submission failed - {result.get('final_submission_message', 'Unknown error')}")
         else:
             print(f"\n ℹ️ No questions were updated (possibly no correct answers found)")
     
@@ -88,7 +111,7 @@ class ProcessorValidator:
 
 
 class RankingProcessor:
-    """Main processor class that orchestrates the ranking process"""
+    """Main processor class that orchestrates the ranking and final submission process"""
     
     def __init__(self):
         self.logger = setup_logger()
@@ -120,21 +143,22 @@ class RankingProcessor:
         return True
     
     def execute_ranking_process(self) -> tuple:
-        """Execute the main ranking process"""
-        self.logger.info("⚙️ Starting ranking process...")
+        """Execute the main ranking process with final submission"""
+        self.logger.info("⚙️ Starting complete ranking and final submission process...")
         start_time = time.time()
         
         try:
-            result = self.ranking_service.process_all_questions()
+            # Use the enhanced method that includes final submission
+            result = self.ranking_service.process_all_questions_with_final_submission()
             processing_time = round(time.time() - start_time, 2)
             return result, processing_time, True
         except Exception as e:
             processing_time = round(time.time() - start_time, 2)
-            self.logger.error(f"❌ Fatal error in ranking processor: {str(e)}")
+            self.logger.error(f"❌ Fatal error in complete ranking processor: {str(e)}")
             return None, processing_time, False
     
     def run(self) -> bool:
-        """Run the complete ranking process"""
+        """Run the complete ranking and final submission process"""
         ProcessorDisplay.print_header()
         
         # Validate prerequisites
@@ -146,7 +170,7 @@ class RankingProcessor:
         result, processing_time, success = self.execute_ranking_process()
         
         if not success:
-            ProcessorDisplay.print_error("Ranking process execution failed")
+            ProcessorDisplay.print_error("Complete ranking and final submission process execution failed")
             return False
         
         # Display results
@@ -157,7 +181,12 @@ class RankingProcessor:
             self.logger.warning("Some updates failed. Check logs for details.")
         
         if result['updated_count'] > 0:
-            self.logger.info("✅ Ranking process completed successfully")
+            if result.get('final_submission_success'):
+                self.logger.info("✅ Complete ranking and final submission process completed successfully")
+            elif result.get('final_ready_count', 0) == 0:
+                self.logger.info("ℹ️ Ranking completed successfully but no questions ready for final submission")
+            else:
+                self.logger.warning("⚠️ Ranking completed but final submission failed")
         else:
             self.logger.info("ℹ️ Ranking process completed with no updates")
         

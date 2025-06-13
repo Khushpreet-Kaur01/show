@@ -1,5 +1,5 @@
 """
-Clean and Enhanced API communication handler
+Clean and Enhanced API communication handler with POST support
 """
 
 import json
@@ -17,7 +17,7 @@ class APIException(Exception):
 
 
 class APIHandler:
-    """Handles all HTTP communication with the API - Clean and Enhanced"""
+    """Handles all HTTP communication with the API - Clean and Enhanced with POST support"""
     
     def __init__(self, base_url: str, api_key: str, endpoint: str):
         self.base_url = base_url
@@ -252,14 +252,17 @@ class APIHandler:
             
         elif status_code == HTTPStatus.BAD_REQUEST:
             logger.error("❌ Bad request - check data format")
+            logger.error(f"Response: {response_text[:200]}")
             raise APIException(f"Bad request: {response_text[:100]}")
             
         elif status_code == HTTPStatus.INTERNAL_SERVER_ERROR:
             logger.error("❌ Server error - API service issue")
-            raise APIException("Server error")
+            logger.error(f"Server response: {response_text[:200]}")
+            raise APIException(f"Server error: {response_text[:100] if response_text else 'No details'}")
         else:
             logger.error(f"❌ HTTP {status_code} error")
-            raise APIException(f"HTTP {status_code} error")
+            logger.error(f"Response: {response_text[:200]}")
+            raise APIException(f"HTTP {status_code} error: {response_text[:100] if response_text else 'No details'}")
     
     def _log_request_details(self, method: str, data: Optional[Dict] = None) -> None:
         """Log request details for debugging - only in debug mode"""
@@ -288,15 +291,18 @@ class APIHandler:
             
         except ValueError as e:
             logger.error(f"❌ Invalid JSON response")
+            logger.error(f"Response text: {response.text[:300]}")
             raise APIException(f"Invalid JSON response: {str(e)}")
     
     def _make_http_request(self, method: str, data: Optional[Dict] = None) -> requests.Response:
-        """Make HTTP request with clean error handling"""
+        """Make HTTP request with clean error handling - NOW SUPPORTS POST!"""
         try:
             if method.upper() == "GET":
                 return requests.get(self.url, headers=self.headers, timeout=self.timeout)
             elif method.upper() == "PUT":
                 return requests.put(self.url, headers=self.headers, json=data, timeout=self.timeout)
+            elif method.upper() == "POST":  # ADDED POST SUPPORT
+                return requests.post(self.url, headers=self.headers, json=data, timeout=self.timeout)
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
         
