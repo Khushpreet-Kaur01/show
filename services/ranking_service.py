@@ -1,5 +1,5 @@
 """
-Enhanced Ranking Service - Complete with Final Submission Integration
+Enhanced Ranking Service - Complete with Final Submission Integration for Input Only
 """
 
 import logging
@@ -153,15 +153,46 @@ class RankingService:
         """Validate question data before sending to API"""
         return DataValidator.validate_question(question)
     
-    # Replace these methods in your services/ranking_service.py file:
-
+    def process_all_questions(self) -> Dict:
+        """Process ranking for all questions and update database"""
+        try:
+            logger.info(LogMessages.PROCESSING_START)
+            
+            # Fetch all questions
+            questions = self._fetch_questions()
+            if not questions:
+                logger.warning("No questions found in API")
+                return self._create_empty_result()
+            
+            logger.info(f"Found {len(questions)} questions to process for ranking")
+            
+            # Process questions for ranking
+            processing_result = self._process_questions_batch(questions)
+            
+            # Update processed questions in database
+            update_result = self._update_processed_questions(processing_result['processed_questions'])
+            
+            # Combine and return results
+            combined_result = self._combine_results(processing_result, update_result, len(questions))
+            
+            logger.info(LogMessages.PROCESSING_COMPLETE)
+            logger.info(f"Results: {combined_result['updated_count']} updated, "
+                       f"{combined_result['failed_count']} failed, "
+                       f"{combined_result['answers_ranked']} answers ranked")
+            
+            return combined_result
+            
+        except Exception as e:
+            logger.error(LogMessages.PROCESSING_FAILED.format(error=str(e)))
+            raise
+    
     def _validate_question_for_final_submission(self, question: Dict) -> bool:
         """Validate if question meets final submission requirements - ONLY Input type questions"""
         question_id = QuestionFormatter.get_question_id(question)
-        question_type = question.get('questionType', '')
+        question_type = question.get('questionType', '').lower()
         
-        # ONLY Input type questions are submitted to final
-        if question_type.lower() != 'input':
+        # BASED ON DEBUG EVIDENCE: Only Input type questions are accepted
+        if question_type != 'input':
             logger.debug(f"Question {question_id} is {question_type} type - only Input questions go to final")
             return False
         
@@ -169,22 +200,25 @@ class RankingService:
             logger.debug(f"Question {question_id} has no answers")
             return False
         
+        all_answers = question.get('answers', [])
+        return self._validate_input_question_for_final(question_id, all_answers)
+
+    def _validate_input_question_for_final(self, question_id: str, all_answers: List[Dict]) -> bool:
+        """Validate Input question for final submission"""
         # Count correct answers with rank > 0 and score > 0
-        valid_correct_answers = 0
-        for answer in question['answers']:
-            if (answer.get('isCorrect') is True and 
-                answer.get('rank', 0) > 0 and 
-                answer.get('score', 0) > 0):
-                valid_correct_answers += 1
+        valid_correct_answers = sum(1 for answer in all_answers 
+                                  if (answer.get('isCorrect') is True and 
+                                      answer.get('rank', 0) > 0 and 
+                                      answer.get('score', 0) > 0))
         
-        # Input type questions need minimum 5 correct answers
-        if valid_correct_answers < 5:
+        # Server requirement: exactly 3 correct answers (we take top 3)
+        if valid_correct_answers < 3:
             logger.info(f"📋 Input question {question_id} needs more correct answers for final submission: "
-                    f"has {valid_correct_answers}, needs 5 minimum")
+                    f"has {valid_correct_answers}, needs 3 minimum")
             return False
         else:
             logger.info(f"✅ Input question {question_id} ready for final submission: "
-                    f"{valid_correct_answers} correct answers")
+                    f"{valid_correct_answers} correct answers (will use top 3)")
             return True
 
     def get_final_submission_summary(self, questions: List[Dict]) -> Dict:
@@ -192,9 +226,10 @@ class RankingService:
         summary = {
             "total_questions": len(questions),
             "total_input_questions": 0,
+            "total_mcq_questions": 0,
             "ready_for_final": 0,
             "needs_more_answers": 0,
-            "non_input_questions": 0,
+            "non_eligible_questions": 0,
             "by_type": {}
         }
         
@@ -221,21 +256,27 @@ class RankingService:
                     correct_count = sum(1 for a in question.get('answers', []) 
                                     if a.get('isCorrect') and a.get('rank', 0) > 0)
                     
-                    if 0 < correct_count < 5:
+                    if 0 < correct_count < 3:
                         summary["needs_more_answers"] += 1
                         summary["by_type"][question_type]["needs_more"] += 1
+            
+            elif question_type.lower() == 'mcq':
+                summary["total_mcq_questions"] += 1
+                summary["non_eligible_questions"] += 1
+                summary["by_type"][question_type]["note"] = "Ranked only (final endpoint rejects MCQ with 400 error)"
+            
             else:
-                summary["non_input_questions"] += 1
-                summary["by_type"][question_type]["note"] = "Not submitted to final (Input only)"
+                summary["non_eligible_questions"] += 1
+                summary["by_type"][question_type]["note"] = "Not submitted to final (Input only based on debug evidence)"
         
         return summary
 
     def process_all_questions_with_final_submission(self) -> Dict:
-        """Process ranking for all questions and submit final results with enhanced reporting"""
+        """Process ranking for all questions and submit final results with update logic for existing questions"""
         try:
             logger.info(LogMessages.PROCESSING_START)
             
-            # Step 1: Process ranking (existing functionality)
+            # Step 1: Process ranking (existing functionality for ALL question types)
             ranking_result = self.process_all_questions()
             
             # Step 2: Get final submission summary before submitting
@@ -253,20 +294,24 @@ class RankingService:
                 logger.info(f"   Ready for Final: {final_summary['ready_for_final']}")
                 logger.info(f"   Need More Answers: {final_summary['needs_more_answers']}")
                 logger.info(f"   Input Questions: {final_summary['total_input_questions']}")
-                logger.info(f"   Non-Input Questions: {final_summary['non_input_questions']}")
+                logger.info(f"   MCQ Questions: {final_summary['total_mcq_questions']}")
+                logger.info(f"   Non-Eligible Questions: {final_summary['non_eligible_questions']}")
                 
-                # Log by question type
+                # Log by question type with updated requirements
                 for q_type, stats in final_summary['by_type'].items():
                     if q_type.lower() == 'input':
-                        logger.info(f"   {q_type}: {stats['ready']}/{stats['total']} ready")
+                        logger.info(f"   {q_type}: {stats['ready']}/{stats['total']} ready for final")
                         if stats['needs_more'] > 0:
-                            logger.warning(f"     ⚠️ {stats['needs_more']} {q_type} questions need more correct answers (min 5)")
+                            logger.warning(f"     ⚠️ {stats['needs_more']} {q_type} questions need more correct answers (min 3)")
+                    elif q_type.lower() == 'mcq':
+                        logger.info(f"   {q_type}: {stats['total']} total (ranked but not submitted to final - server rejects MCQ)")
                     else:
                         logger.info(f"   {q_type}: {stats['total']} total (not submitted to final)")
                 
-                # Submit to final endpoint
+                # Submit to final endpoint with update logic (Input questions only)
                 if final_summary['ready_for_final'] > 0:
                     logger.info(f"📤 Proceeding with final submission of {final_summary['ready_for_final']} Input questions...")
+                    logger.info("💡 Note: Will update existing questions if answers have changed")
                     final_result = self.db.submit_final_questions(updated_questions)
                 else:
                     logger.warning("⚠️ No Input questions ready for final submission - skipping final submission")
@@ -274,27 +319,48 @@ class RankingService:
                         "submitted_count": 0,
                         "total_processed": len(updated_questions),
                         "success": False,
-                        "message": "No Input questions met minimum requirements for final submission"
+                        "message": "No Input questions met requirements for final submission"
                     }
                 
-                # Combine results
+                # Combine results with update details
                 combined_result = ranking_result.copy()
                 combined_result.update({
                     "final_submitted_count": final_result["submitted_count"],
                     "final_submission_success": final_result.get("success", False),
                     "final_submission_message": final_result.get("message", ""),
                     "final_ready_count": final_summary['ready_for_final'],
-                    "final_needs_more_count": final_summary['needs_more_answers']
+                    "final_needs_more_count": final_summary['needs_more_answers'],
+                    "final_submission_details": final_result.get("details", {})
                 })
                 
+                # Enhanced success/failure logging
                 if final_result.get("success"):
+                    details = final_result.get("details", {})
+                    new_count = details.get("new_submitted", 0)
+                    updated_count = details.get("updated", 0)
+                    unchanged_count = details.get("unchanged", 0)
+                    
+                    message_parts = []
+                    if new_count > 0:
+                        message_parts.append(f"{new_count} new questions submitted")
+                    if updated_count > 0:
+                        message_parts.append(f"{updated_count} questions updated")
+                    if unchanged_count > 0:
+                        message_parts.append(f"{unchanged_count} questions unchanged")
+                    
+                    final_message = "; ".join(message_parts) if message_parts else "processed"
+                    
                     logger.info(f"🎉 Complete process finished! Ranked {ranking_result['updated_count']} questions, "
-                            f"submitted {final_result['submitted_count']} Input questions to final collection")
+                            f"final submission: {final_message}")
+                            
                 elif final_summary['ready_for_final'] == 0:
-                    logger.info(f"ℹ️ Ranking completed but no Input questions ready for final submission "
-                            f"({final_summary['needs_more_answers']} need more correct answers)")
+                    logger.info(f"ℹ️ Ranking completed but no Input questions ready for final submission")
                 else:
-                    logger.warning(f"⚠️ Ranking completed but final submission failed: {final_result.get('message', 'Unknown error')}")
+                    # Check if it was a "no changes" scenario vs actual failure
+                    if "No changes detected" in final_result.get("message", ""):
+                        logger.info(f"ℹ️ Ranking completed, final collection already up to date")
+                    else:
+                        logger.warning(f"⚠️ Ranking completed but final submission failed: {final_result.get('message', 'Unknown error')}")
                 
                 return combined_result
             else:
@@ -304,7 +370,8 @@ class RankingService:
                     "final_submission_success": False,
                     "final_submission_message": "No ranked questions to submit",
                     "final_ready_count": 0,
-                    "final_needs_more_count": 0
+                    "final_needs_more_count": 0,
+                    "final_submission_details": {}
                 })
                 return ranking_result
                 

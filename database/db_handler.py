@@ -488,9 +488,9 @@ class DatabaseHandler:
         }
     
     def submit_final_questions(self, questions: List[Dict]) -> Dict:
-        """Submit final ranked questions to the final endpoint with enhanced debugging"""
+        """Submit final ranked questions to the final endpoint with update logic for existing questions"""
         try:
-            logger.info("🏆 Starting final submission process...")
+            logger.info("🏆 Starting final submission process with update logic...")
             
             # Filter and format questions for final submission
             final_questions = self._prepare_questions_for_final_submission(questions)
@@ -504,66 +504,11 @@ class DatabaseHandler:
                     "message": "No questions with ranked correct answers found"
                 }
             
-            logger.info(f"📤 Submitting {len(final_questions)} questions to final endpoint")
+            # Check for existing questions in final collection and handle updates
+            submission_result = self._handle_final_submission_with_updates(final_questions)
             
-            # Prepare payload
-            final_payload = {"questions": final_questions}
+            return submission_result
             
-            # 🔍 DEBUG: Log the exact payload being sent
-            logger.info("🔍 DEBUG: Final payload being sent:")
-            logger.info("=" * 50)
-            logger.info(json.dumps(final_payload, indent=2, default=str))
-            logger.info("=" * 50)
-            
-            # Create final API handler for the final endpoint
-            final_api = APIHandler(
-                base_url=Config.API_BASE_URL,
-                api_key=Config.API_KEY,
-                endpoint="/api/v1/admin/survey/final"
-            )
-            
-            # Make the final submission
-            response = final_api.make_request("POST", final_payload)
-            
-            # 🔍 DEBUG: Log the response
-            logger.info(f"🔍 DEBUG: Server response: {json.dumps(response, indent=2, default=str)}")
-            
-            # Check response
-            if ResponseProcessor.is_success_response(response):
-                logger.info(f"✅ Final submission successful: {len(final_questions)} questions submitted")
-                
-                self.last_operation_details = {
-                    "operation": "final_submission",
-                    "success": True,
-                    "submitted_count": len(final_questions),
-                    "total_processed": len(questions),
-                    "response_preview": str(response)[:200]
-                }
-                
-                return {
-                    "submitted_count": len(final_questions),
-                    "total_processed": len(questions),
-                    "success": True,
-                    "message": "Final submission completed successfully"
-                }
-            else:
-                error_msg = response.get("message", str(response))
-                logger.error(f"❌ Final submission failed: {error_msg}")
-                
-                self.last_operation_details = {
-                    "operation": "final_submission",
-                    "success": False,
-                    "error": error_msg,
-                    "response": response
-                }
-                
-                return {
-                    "submitted_count": 0,
-                    "total_processed": len(questions),
-                    "success": False,
-                    "error": error_msg
-                }
-                
         except Exception as e:
             logger.error(f"❌ Final submission failed with exception: {str(e)}")
             
@@ -580,18 +525,301 @@ class DatabaseHandler:
                 "success": False,
                 "error": str(e)
             }
-    
+
+    def _handle_final_submission_with_updates(self, final_questions: List[Dict]) -> Dict:
+        """Handle final submission with logic to update existing questions if answers changed"""
+        try:
+            # First, get existing final collection to check for duplicates
+            existing_final_questions = self._get_existing_final_questions()
+            
+            if existing_final_questions is None:
+                logger.warning("⚠️ Could not retrieve existing final collection, proceeding with normal submission")
+                return self._submit_new_final_questions(final_questions)
+            
+            # Categorize questions: new vs existing with changes
+            new_questions, updated_questions, unchanged_questions = self._categorize_questions_for_submission(
+                final_questions, existing_final_questions
+            )
+            
+            logger.info(f"📊 Final submission analysis:")
+            logger.info(f"   📝 New questions: {len(new_questions)}")
+            logger.info(f"   🔄 Questions with changes: {len(updated_questions)}")
+            logger.info(f"   ✅ Unchanged questions: {len(unchanged_questions)}")
+            
+            total_submitted = 0
+            success_messages = []
+            
+            # Submit new questions
+            if new_questions:
+                new_result = self._submit_new_final_questions(new_questions)
+                if new_result.get("success"):
+                    total_submitted += new_result["submitted_count"]
+                    success_messages.append(f"{new_result['submitted_count']} new questions submitted")
+                else:
+                    logger.error(f"❌ Failed to submit new questions: {new_result.get('message', 'Unknown error')}")
+            
+            # Update existing questions with changes
+            if updated_questions:
+                update_result = self._update_existing_final_questions(updated_questions)
+                if update_result.get("success"):
+                    total_submitted += update_result["submitted_count"]
+                    success_messages.append(f"{update_result['submitted_count']} questions updated")
+                else:
+                    logger.error(f"❌ Failed to update existing questions: {update_result.get('message', 'Unknown error')}")
+            
+            # Report unchanged questions
+            if unchanged_questions:
+                logger.info(f"ℹ️ {len(unchanged_questions)} questions unchanged, skipped submission")
+            
+            # Prepare final result
+            overall_success = total_submitted > 0 or len(unchanged_questions) > 0
+            message = "; ".join(success_messages) if success_messages else "No changes detected"
+            
+            if overall_success:
+                logger.info(f"✅ Final submission completed: {message}")
+            
+            return {
+                "submitted_count": total_submitted,
+                "total_processed": len(final_questions),
+                "success": overall_success,
+                "message": message,
+                "details": {
+                    "new_submitted": len(new_questions) if new_questions else 0,
+                    "updated": len(updated_questions) if updated_questions else 0,
+                    "unchanged": len(unchanged_questions)
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Error in final submission with updates: {str(e)}")
+            return {
+                "submitted_count": 0,
+                "total_processed": len(final_questions),
+                "success": False,
+                "error": str(e)
+            }
+
+    def _get_existing_final_questions(self) -> Optional[List[Dict]]:
+        """Get existing questions from final collection"""
+        try:
+            final_api = APIHandler(
+                base_url=Config.API_BASE_URL,
+                api_key=Config.API_KEY,
+                endpoint="/api/v1/admin/survey/final"
+            )
+            
+            response = final_api.make_request("GET")
+            
+            if ResponseProcessor.is_success_response(response):
+                existing_questions = ResponseProcessor.extract_questions_from_response(response)
+                logger.info(f"📋 Found {len(existing_questions)} existing questions in final collection")
+                return existing_questions
+            else:
+                logger.warning("⚠️ Could not retrieve final collection")
+                return None
+                
+        except Exception as e:
+            logger.warning(f"⚠️ Error retrieving final collection: {str(e)}")
+            return None
+
+    def _categorize_questions_for_submission(self, final_questions: List[Dict], existing_final_questions: List[Dict]) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+        """Categorize questions as new, updated, or unchanged"""
+        new_questions = []
+        updated_questions = []
+        unchanged_questions = []
+        
+        # Create lookup of existing questions by question text (case insensitive)
+        existing_lookup = {}
+        for existing in existing_final_questions:
+            question_text = existing.get('question', '').strip().lower()
+            if question_text:
+                existing_lookup[question_text] = existing
+        
+        for question in final_questions:
+            question_text = question.get('question', '').strip().lower()
+            question_id = QuestionFormatter.get_question_id(question)
+            
+            if question_text in existing_lookup:
+                existing_question = existing_lookup[question_text]
+                
+                # Compare answers to see if there are changes
+                if self._answers_have_changed(question, existing_question):
+                    # Add the existing question ID for update
+                    question['_existing_id'] = existing_question.get('_id')
+                    updated_questions.append(question)
+                    logger.info(f"🔄 Question '{question_text[:50]}...' has answer changes, will update")
+                else:
+                    unchanged_questions.append(question)
+                    logger.info(f"✅ Question '{question_text[:50]}...' unchanged, skipping")
+            else:
+                new_questions.append(question)
+                logger.info(f"📝 Question '{question_text[:50]}...' is new, will submit")
+        
+        return new_questions, updated_questions, unchanged_questions
+
+    def _answers_have_changed(self, new_question: Dict, existing_question: Dict) -> bool:
+        """Compare answers between new and existing questions to detect changes"""
+        new_answers = new_question.get('answers', [])
+        existing_answers = existing_question.get('answers', [])
+        
+        # Quick check: different number of answers
+        if len(new_answers) != len(existing_answers):
+            logger.debug(f"Answer count changed: {len(existing_answers)} -> {len(new_answers)}")
+            return True
+        
+        # Create normalized answer comparison
+        def normalize_answer_for_comparison(answer):
+            return {
+                'answer': str(answer.get('answer', '')).strip().lower(),
+                'isCorrect': bool(answer.get('isCorrect', False)),
+                'rank': int(answer.get('rank', 0)),
+                'score': int(answer.get('score', 0)),
+                'responseCount': int(answer.get('responseCount', 0))
+            }
+        
+        # Normalize and sort answers for comparison
+        new_normalized = sorted([normalize_answer_for_comparison(a) for a in new_answers], 
+                            key=lambda x: (x['answer'], x['rank']))
+        existing_normalized = sorted([normalize_answer_for_comparison(a) for a in existing_answers], 
+                                    key=lambda x: (x['answer'], x['rank']))
+        
+        # Compare normalized answers
+        if new_normalized != existing_normalized:
+            logger.debug("Answer content, rankings, or scores have changed")
+            return True
+        
+        logger.debug("No significant changes detected in answers")
+        return False
+
+    def _submit_new_final_questions(self, new_questions: List[Dict]) -> Dict:
+        """Submit completely new questions to final collection"""
+        logger.info(f"📤 Submitting {len(new_questions)} new questions to final endpoint")
+        
+        # Prepare payload
+        final_payload = {"questions": new_questions}
+        
+        # Log payload for debugging
+        logger.debug("🔍 New questions payload:")
+        logger.debug(json.dumps(final_payload, indent=2, default=str)[:500] + "...")
+        
+        # Create final API handler
+        final_api = APIHandler(
+            base_url=Config.API_BASE_URL,
+            api_key=Config.API_KEY,
+            endpoint="/api/v1/admin/survey/final"
+        )
+        
+        # Make the submission
+        response = final_api.make_request("POST", final_payload)
+        
+        # Check response
+        if ResponseProcessor.is_success_response(response):
+            logger.info(f"✅ Successfully submitted {len(new_questions)} new questions")
+            return {
+                "submitted_count": len(new_questions),
+                "success": True,
+                "message": f"Submitted {len(new_questions)} new questions"
+            }
+        else:
+            error_msg = response.get("message", str(response))
+            logger.error(f"❌ Failed to submit new questions: {error_msg}")
+            return {
+                "submitted_count": 0,
+                "success": False,
+                "message": error_msg
+            }
+
+    def _update_existing_final_questions(self, updated_questions: List[Dict]) -> Dict:
+        """Update existing questions in final collection"""
+        logger.info(f"🔄 Updating {len(updated_questions)} existing questions in final collection")
+        
+        successful_updates = 0
+        
+        for question in updated_questions:
+            question_id = question.get('_existing_id')
+            question_text = question.get('question', '')[:50]
+            
+            if not question_id:
+                logger.error(f"❌ No existing ID found for question '{question_text}...'")
+                continue
+            
+            # Prepare single question update
+            update_payload = {"questions": [question]}
+            
+            # Try to update via PUT to the specific question endpoint
+            success = self._update_single_final_question(question_id, update_payload)
+            
+            if success:
+                successful_updates += 1
+                logger.info(f"✅ Updated question '{question_text}...'")
+            else:
+                logger.error(f"❌ Failed to update question '{question_text}...'")
+        
+        if successful_updates > 0:
+            logger.info(f"✅ Successfully updated {successful_updates}/{len(updated_questions)} questions")
+        
+        return {
+            "submitted_count": successful_updates,
+            "success": successful_updates > 0,
+            "message": f"Updated {successful_updates} of {len(updated_questions)} questions"
+        }
+
+    def _update_single_final_question(self, question_id: str, update_payload: Dict) -> bool:
+        """Update a single question in final collection"""
+        try:
+            # Try different update approaches
+            update_endpoints = [
+                f"/api/v1/admin/survey/final/{question_id}",  # RESTful update
+                "/api/v1/admin/survey/final",                  # Bulk update
+            ]
+            
+            for endpoint in update_endpoints:
+                try:
+                    final_api = APIHandler(
+                        base_url=Config.API_BASE_URL,
+                        api_key=Config.API_KEY,
+                        endpoint=endpoint
+                    )
+                    
+                    # Try PUT first, then PATCH
+                    for method in ["PUT", "PATCH"]:
+                        try:
+                            response = final_api.make_request(method, update_payload)
+                            
+                            if ResponseProcessor.is_success_response(response):
+                                logger.debug(f"✅ Updated via {method} {endpoint}")
+                                return True
+                            else:
+                                logger.debug(f"❌ {method} {endpoint} failed: {response.get('message', 'Unknown error')}")
+                        except Exception as method_error:
+                            logger.debug(f"❌ {method} {endpoint} error: {str(method_error)}")
+                            continue
+                            
+                except Exception as endpoint_error:
+                    logger.debug(f"❌ Endpoint {endpoint} error: {str(endpoint_error)}")
+                    continue
+            
+            # If all update attempts fail, log detailed error
+            logger.warning(f"⚠️ All update methods failed for question {question_id}")
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ Error updating question {question_id}: {str(e)}")
+            return False
+        # Updated method for database/db_handler.py - Test with Input questions only
+
     def _prepare_questions_for_final_submission(self, questions: List[Dict]) -> List[Dict]:
-        """Prepare questions for final submission - ONLY Input type questions with minimum 5 correct answers"""
+        """Prepare questions for final submission - ONLY Input type questions (based on debug evidence)"""
         final_questions = []
         
         for question in questions:
             question_id = QuestionFormatter.get_question_id(question)
-            question_type = question.get('questionType', '')
+            question_type = question.get('questionType', '').lower()
             
-            # ONLY process Input type questions for final submission
-            if question_type.lower() != 'input':
-                logger.info(f"⏭️ Skipping question {question_id} - Only Input type questions are submitted to final (Type: {question_type})")
+            # BASED ON DEBUG EVIDENCE: Only Input type questions for final submission
+            # MCQ questions return 400 Bad Request, Input questions get 500 (pass validation)
+            if question_type != 'input':
+                logger.info(f"⏭️ Skipping question {question_id} - Only Input type questions submitted to final (Type: {question.get('questionType', '')})")
                 continue
             
             # Check if question has answers
@@ -599,30 +827,11 @@ class DatabaseHandler:
                 logger.debug(f"Skipping question {question_id} - no answers")
                 continue
             
-            # Filter answers: only isCorrect=true with rank > 0 and score > 0
-            final_answers = []
-            for answer in question['answers']:
-                if (answer.get('isCorrect') is True and 
-                    answer.get('rank', 0) > 0 and 
-                    answer.get('score', 0) > 0):
-                    
-                    # Format answer for final submission - ensure clean data types
-                    final_answer = {
-                        "answer": str(answer.get('answer', '')),  # Ensure string
-                        "responseCount": int(answer.get('responseCount', 0)),  # Ensure integer
-                        "isCorrect": True,  # Always true for final submission
-                        "rank": int(answer.get('rank', 0)),  # Ensure integer
-                        "score": int(answer.get('score', 0))  # Ensure integer
-                    }
-                    final_answers.append(final_answer)
+            # Validate based on question type and server requirements
+            should_include, final_answers = self._validate_and_prepare_answers_for_final(question, question_id, question_type)
             
-            # Apply business rule: Input type questions need minimum 5 correct answers
-            if len(final_answers) < 5:
-                logger.warning(f"⚠️ Skipping Input question {question_id} - needs minimum 5 correct answers, found {len(final_answers)}")
-                continue
-            
-            # Include Input question with valid final answers
-            if final_answers:
+            # Include question if it meets the requirements
+            if should_include and final_answers:
                 final_question = {
                     "question": str(question.get('question', '')),  # Ensure string
                     "questionType": str(question.get('questionType', '')),  # Ensure string
@@ -633,12 +842,130 @@ class DatabaseHandler:
                     "answers": final_answers
                 }
                 final_questions.append(final_question)
-                logger.info(f"✅ Input question {question_id} prepared with {len(final_answers)} final answers")
             else:
-                logger.debug(f"⏭️ Skipping Input question {question_id} - no ranked correct answers")
+                logger.debug(f"⏭️ Skipping {question_type} question {question_id} - server requirements not met")
         
         logger.info(f"📋 Prepared {len(final_questions)} Input questions for final submission")
+        
+        if len(final_questions) > 0:
+            logger.info(f"   📝 Input questions: {len(final_questions)} (exactly 3 correct answers each)")
+        else:
+            logger.warning("⚠️ No Input questions ready for final submission")
+            logger.info("💡 Note: Debug evidence shows only Input questions are accepted by final endpoint")
+            logger.info("💡 MCQ questions return 400 Bad Request - they may not be supported in final collection")
+        
         return final_questions
+
+    def _validate_and_prepare_answers_for_final(self, question: Dict, question_id: str, question_type: str) -> Tuple[bool, List[Dict]]:
+        """Validate and prepare answers according to server requirements"""
+        
+        all_answers = question.get('answers', [])
+        
+        if question_type == 'input':
+            return self._prepare_input_question_for_final(question_id, all_answers)
+        elif question_type == 'mcq':
+            return self._prepare_mcq_question_for_final(question_id, all_answers)
+        
+        return False, []
+
+    def _prepare_input_question_for_final(self, question_id: str, all_answers: List[Dict]) -> Tuple[bool, List[Dict]]:
+        """Prepare Input question according to server requirements:
+        - Must have at least 3 valid answers
+        - Must have exactly 3 correct answers
+        - Only correct answers are kept
+        """
+        
+        # Filter to only correct answers with rank > 0 and score > 0
+        correct_answers = []
+        for answer in all_answers:
+            if (answer.get('isCorrect') is True and 
+                answer.get('rank', 0) > 0 and 
+                answer.get('score', 0) > 0):
+                correct_answers.append(answer)
+        
+        # Server requirement: exactly 3 correct answers for Input questions
+        if len(correct_answers) < 3:
+            logger.warning(f"⚠️ Skipping Input question {question_id} - needs minimum 3 correct answers, found {len(correct_answers)}")
+            return False, []
+        
+        # Take only the top 3 correct answers (sorted by rank)
+        correct_answers.sort(key=lambda x: x.get('rank', 999))
+        top_3_answers = correct_answers[:3]
+        
+        # Format answers for final submission
+        final_answers = []
+        for answer in top_3_answers:
+            final_answer = {
+                "answer": str(answer.get('answer', '')).strip(),  # Ensure string and trim
+                "responseCount": int(answer.get('responseCount', 0)),  # Ensure integer
+                "isCorrect": True,  # Always true for final submission
+                "rank": int(answer.get('rank', 0)),  # Ensure integer
+                "score": int(answer.get('score', 0))  # Ensure integer
+            }
+            
+            # Server validation: answer must not be empty
+            if not final_answer["answer"]:
+                logger.warning(f"⚠️ Skipping Input question {question_id} - has empty answer")
+                return False, []
+                
+            final_answers.append(final_answer)
+        
+        logger.info(f"✅ Input question {question_id} ready for final submission with exactly 3 correct answers")
+        return True, final_answers
+
+    def _prepare_mcq_question_for_final(self, question_id: str, all_answers: List[Dict]) -> Tuple[bool, List[Dict]]:
+        """Prepare MCQ question according to server requirements:
+        - Must have exactly 4 answer options
+        - Must have exactly 1 correct answer
+        - Each answer must have non-empty text
+        - Answer options must be unique
+        - ALL answers (correct and incorrect) are included
+        """
+        
+        # Server requirement: exactly 4 answers for MCQ
+        if len(all_answers) != 4:
+            logger.warning(f"⚠️ Skipping MCQ question {question_id} - needs exactly 4 answer options, found {len(all_answers)}")
+            return False, []
+        
+        # Count correct answers
+        correct_answers = [a for a in all_answers if a.get('isCorrect') is True]
+        
+        # Server requirement: exactly 1 correct answer
+        if len(correct_answers) != 1:
+            logger.warning(f"⚠️ Skipping MCQ question {question_id} - needs exactly 1 correct answer, found {len(correct_answers)}")
+            return False, []
+        
+        # Check for empty answers and duplicates
+        answer_texts = []
+        for answer in all_answers:
+            answer_text = str(answer.get('answer', '')).strip()
+            
+            # Server validation: each answer must have non-empty text
+            if not answer_text:
+                logger.warning(f"⚠️ Skipping MCQ question {question_id} - has empty answer text")
+                return False, []
+            
+            answer_texts.append(answer_text.lower())
+        
+        # Server validation: answer options must be unique
+        if len(set(answer_texts)) != len(answer_texts):
+            logger.warning(f"⚠️ Skipping MCQ question {question_id} - answer options must be unique")
+            return False, []
+        
+        # Format all answers for final submission (including incorrect ones)
+        final_answers = []
+        for answer in all_answers:
+            final_answer = {
+                "answer": str(answer.get('answer', '')).strip(),  # Ensure string and trim
+                "responseCount": int(answer.get('responseCount', 0)),  # Ensure integer
+                "isCorrect": bool(answer.get('isCorrect', False)),  # Preserve correct/incorrect
+                "rank": int(answer.get('rank', 0)),  # Ensure integer
+                "score": int(answer.get('score', 0))  # Ensure integer
+            }
+            final_answers.append(final_answer)
+        
+        logger.info(f"✅ MCQ question {question_id} ready for final submission with 4 options and 1 correct answer")
+        return True, final_answers
     
     def get_diagnostic_summary(self) -> Dict:
         """Get comprehensive diagnostic information"""
