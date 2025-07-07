@@ -104,12 +104,11 @@ When you run the ranking processor, it follows this workflow:
 7. **Updates** questions back to `/api/v1/admin/survey`
 
 ### 2. Final Endpoint Process (📤 POST)
+POSt will be used once done with the survey and answers has been ranked.
 
-
-1. **GET** existing questions from `/api/v1/admin/survey/final`
-2. **DELETE** all existing questions from final endpoint
-3. **POST** new ranked Input questions (with 3+ correct answers) to final endpoint
-4. **Only includes** correct answers in the POST (filters out incorrect answers)
+1. **DELETE** the questions from final endpoint if exists
+2. **POST** new ranked Input questions (with 3+ correct answers)from /survey to /survey/final endpoint
+3. **Only includes** correct answers in the POST (filters out incorrect answers)
 
 ## 📈 Understanding the Output
 
